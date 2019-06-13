@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE targetDefinitions [ 
+	<!ELEMENT targetDefinitions (board)>
+	<!ELEMENT board (name, dbgIF+, dbgDEV, mcuId)>
+	<!ELEMENT name (#PCDATA)>
+	<!ELEMENT dbgIF (#PCDATA)>
+	<!ELEMENT dbgDEV (#PCDATA)>
+	<!ELEMENT mcuId (#PCDATA)>
+	<!ATTLIST board id CDATA #REQUIRED>
+]>
+
+<targetDefinitions>
+  <board id="32f769idiscovery">
+    <name>32F769IDISCOVERY</name>
+    <dbgIF>JTAG</dbgIF>
+    <dbgIF>SWD</dbgIF>
+    <mcuId>stm32f769nihx</mcuId>
+  </board>
+</targetDefinitions>
