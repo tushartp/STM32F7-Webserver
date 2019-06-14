@@ -5,7 +5,7 @@ This is the secure webserver demo running on STM32F769I-DISCO board from STMicro
 
 This demo uses webserver library from https://libwebsockets.org/
 
-It contains the stable version of library from v3.1-stable branch from https://github.com/warmcat/libwebsockets/tree/v3.1-stable and some modification needed to work with FatFs, LWIP and FreeRTOS.
+It contains the last known good commit(v3.1.0-174-g69fbc272) version of library from https://github.com/warmcat/libwebsockets
 
 To compile the project please download free eclipse based IDE from ST's website https://www.st.com/en/development-tools/stm32cubeide.html
 
