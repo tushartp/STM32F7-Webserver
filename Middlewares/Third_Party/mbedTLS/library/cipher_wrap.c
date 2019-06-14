@@ -33,6 +33,10 @@
 
 #include "mbedtls/cipher_internal.h"
 
+#if defined(MBEDTLS_CHACHAPOLY_C)
+#include "mbedtls/chachapoly.h"
+#endif
+
 #if defined(MBEDTLS_AES_C)
 #include "mbedtls/aes.h"
 #endif
@@ -57,12 +61,20 @@
 #include "mbedtls/blowfish.h"
 #endif
 
+#if defined(MBEDTLS_CHACHA20_C)
+#include "mbedtls/chacha20.h"
+#endif
+
 #if defined(MBEDTLS_GCM_C)
 #include "mbedtls/gcm.h"
 #endif
 
 #if defined(MBEDTLS_CCM_C)
 #include "mbedtls/ccm.h"
+#endif
+
+#if defined(MBEDTLS_NIST_KW_C)
+#include "mbedtls/nist_kw.h"
 #endif
 
 #if defined(MBEDTLS_CIPHER_NULL_CIPHER)
@@ -250,7 +262,7 @@ static const mbedtls_cipher_info_t aes_128_ecb_info = {
     MBEDTLS_MODE_ECB,
     128,
     "AES-128-ECB",
-    16,
+    0,
     0,
     16,
     &aes_info
@@ -261,7 +273,7 @@ static const mbedtls_cipher_info_t aes_192_ecb_info = {
     MBEDTLS_MODE_ECB,
     192,
     "AES-192-ECB",
-    16,
+    0,
     0,
     16,
     &aes_info
@@ -272,7 +284,7 @@ static const mbedtls_cipher_info_t aes_256_ecb_info = {
     MBEDTLS_MODE_ECB,
     256,
     "AES-256-ECB",
-    16,
+    0,
     0,
     16,
     &aes_info
@@ -1886,6 +1898,162 @@ static const mbedtls_cipher_info_t arc4_128_info = {
 };
 #endif /* MBEDTLS_ARC4_C */
 
+#if defined(MBEDTLS_CHACHA20_C)
+
+static int chacha20_setkey_wrap( void *ctx, const unsigned char *key,
+                                 unsigned int key_bitlen )
+{
+    if( key_bitlen != 256U )
+        return( MBEDTLS_ERR_CIPHER_BAD_INPUT_DATA );
+
+    if ( 0 != mbedtls_chacha20_setkey( (mbedtls_chacha20_context*)ctx, key ) )
+        return( MBEDTLS_ERR_CIPHER_BAD_INPUT_DATA );
+
+    return( 0 );
+}
+
+static int chacha20_stream_wrap( void *ctx,  size_t length,
+                                 const unsigned char *input,
+                                 unsigned char *output )
+{
+    int ret;
+
+    ret = mbedtls_chacha20_update( ctx, length, input, output );
+    if( ret == MBEDTLS_ERR_CHACHA20_BAD_INPUT_DATA )
+        return( MBEDTLS_ERR_CIPHER_BAD_INPUT_DATA );
+
+    return( ret );
+}
+
+static void * chacha20_ctx_alloc( void )
+{
+    mbedtls_chacha20_context *ctx;
+    ctx = mbedtls_calloc( 1, sizeof( mbedtls_chacha20_context ) );
+
+    if( ctx == NULL )
+        return( NULL );
+
+    mbedtls_chacha20_init( ctx );
+
+    return( ctx );
+}
+
+static void chacha20_ctx_free( void *ctx )
+{
+    mbedtls_chacha20_free( (mbedtls_chacha20_context *) ctx );
+    mbedtls_free( ctx );
+}
+
+static const mbedtls_cipher_base_t chacha20_base_info = {
+    MBEDTLS_CIPHER_ID_CHACHA20,
+    NULL,
+#if defined(MBEDTLS_CIPHER_MODE_CBC)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_CFB)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_OFB)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_CTR)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_XTS)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_STREAM)
+    chacha20_stream_wrap,
+#endif
+    chacha20_setkey_wrap,
+    chacha20_setkey_wrap,
+    chacha20_ctx_alloc,
+    chacha20_ctx_free
+};
+static const mbedtls_cipher_info_t chacha20_info = {
+    MBEDTLS_CIPHER_CHACHA20,
+    MBEDTLS_MODE_STREAM,
+    256,
+    "CHACHA20",
+    12,
+    0,
+    1,
+    &chacha20_base_info
+};
+#endif /* MBEDTLS_CHACHA20_C */
+
+#if defined(MBEDTLS_CHACHAPOLY_C)
+
+static int chachapoly_setkey_wrap( void *ctx,
+                                   const unsigned char *key,
+                                   unsigned int key_bitlen )
+{
+    if( key_bitlen != 256U )
+        return( MBEDTLS_ERR_CIPHER_BAD_INPUT_DATA );
+
+    if ( 0 != mbedtls_chachapoly_setkey( (mbedtls_chachapoly_context*)ctx, key ) )
+        return( MBEDTLS_ERR_CIPHER_BAD_INPUT_DATA );
+
+    return( 0 );
+}
+
+static void * chachapoly_ctx_alloc( void )
+{
+    mbedtls_chachapoly_context *ctx;
+    ctx = mbedtls_calloc( 1, sizeof( mbedtls_chachapoly_context ) );
+
+    if( ctx == NULL )
+        return( NULL );
+
+    mbedtls_chachapoly_init( ctx );
+
+    return( ctx );
+}
+
+static void chachapoly_ctx_free( void *ctx )
+{
+    mbedtls_chachapoly_free( (mbedtls_chachapoly_context *) ctx );
+    mbedtls_free( ctx );
+}
+
+static const mbedtls_cipher_base_t chachapoly_base_info = {
+    MBEDTLS_CIPHER_ID_CHACHA20,
+    NULL,
+#if defined(MBEDTLS_CIPHER_MODE_CBC)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_CFB)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_OFB)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_CTR)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_XTS)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_STREAM)
+    NULL,
+#endif
+    chachapoly_setkey_wrap,
+    chachapoly_setkey_wrap,
+    chachapoly_ctx_alloc,
+    chachapoly_ctx_free
+};
+static const mbedtls_cipher_info_t chachapoly_info = {
+    MBEDTLS_CIPHER_CHACHA20_POLY1305,
+    MBEDTLS_MODE_CHACHAPOLY,
+    256,
+    "CHACHA20-POLY1305",
+    12,
+    0,
+    1,
+    &chachapoly_base_info
+};
+#endif /* MBEDTLS_CHACHAPOLY_C */
+
 #if defined(MBEDTLS_CIPHER_NULL_CIPHER)
 static int null_crypt_stream( void *ctx, size_t length,
                               const unsigned char *input,
@@ -1954,6 +2122,131 @@ static const mbedtls_cipher_info_t null_cipher_info = {
     &null_base_info
 };
 #endif /* defined(MBEDTLS_CIPHER_NULL_CIPHER) */
+
+#if defined(MBEDTLS_NIST_KW_C)
+static void *kw_ctx_alloc( void )
+{
+    void *ctx = mbedtls_calloc( 1, sizeof( mbedtls_nist_kw_context ) );
+
+    if( ctx != NULL )
+        mbedtls_nist_kw_init( (mbedtls_nist_kw_context *) ctx );
+
+    return( ctx );
+}
+
+static void kw_ctx_free( void *ctx )
+{
+    mbedtls_nist_kw_free( ctx );
+    mbedtls_free( ctx );
+}
+
+static int kw_aes_setkey_wrap( void *ctx, const unsigned char *key,
+                                unsigned int key_bitlen )
+{
+    return mbedtls_nist_kw_setkey( (mbedtls_nist_kw_context *) ctx,
+                                   MBEDTLS_CIPHER_ID_AES, key, key_bitlen, 1 );
+}
+
+static int kw_aes_setkey_unwrap( void *ctx, const unsigned char *key,
+                                unsigned int key_bitlen )
+{
+   return mbedtls_nist_kw_setkey( (mbedtls_nist_kw_context *) ctx,
+                                  MBEDTLS_CIPHER_ID_AES, key, key_bitlen, 0 );
+}
+
+static const mbedtls_cipher_base_t kw_aes_info = {
+    MBEDTLS_CIPHER_ID_AES,
+    NULL,
+#if defined(MBEDTLS_CIPHER_MODE_CBC)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_CFB)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_OFB)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_CTR)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_XTS)
+    NULL,
+#endif
+#if defined(MBEDTLS_CIPHER_MODE_STREAM)
+    NULL,
+#endif
+    kw_aes_setkey_wrap,
+    kw_aes_setkey_unwrap,
+    kw_ctx_alloc,
+    kw_ctx_free,
+};
+
+static const mbedtls_cipher_info_t aes_128_nist_kw_info = {
+    MBEDTLS_CIPHER_AES_128_KW,
+    MBEDTLS_MODE_KW,
+    128,
+    "AES-128-KW",
+    0,
+    0,
+    16,
+    &kw_aes_info
+};
+
+static const mbedtls_cipher_info_t aes_192_nist_kw_info = {
+    MBEDTLS_CIPHER_AES_192_KW,
+    MBEDTLS_MODE_KW,
+    192,
+    "AES-192-KW",
+    0,
+    0,
+    16,
+    &kw_aes_info
+};
+
+static const mbedtls_cipher_info_t aes_256_nist_kw_info = {
+    MBEDTLS_CIPHER_AES_256_KW,
+    MBEDTLS_MODE_KW,
+    256,
+    "AES-256-KW",
+    0,
+    0,
+    16,
+    &kw_aes_info
+};
+
+static const mbedtls_cipher_info_t aes_128_nist_kwp_info = {
+    MBEDTLS_CIPHER_AES_128_KWP,
+    MBEDTLS_MODE_KWP,
+    128,
+    "AES-128-KWP",
+    0,
+    0,
+    16,
+    &kw_aes_info
+};
+
+static const mbedtls_cipher_info_t aes_192_nist_kwp_info = {
+    MBEDTLS_CIPHER_AES_192_KWP,
+    MBEDTLS_MODE_KWP,
+    192,
+    "AES-192-KWP",
+    0,
+    0,
+    16,
+    &kw_aes_info
+};
+
+static const mbedtls_cipher_info_t aes_256_nist_kwp_info = {
+    MBEDTLS_CIPHER_AES_256_KWP,
+    MBEDTLS_MODE_KWP,
+    256,
+    "AES-256-KWP",
+    0,
+    0,
+    16,
+    &kw_aes_info
+};
+#endif /* MBEDTLS_NIST_KW_C */
 
 const mbedtls_cipher_definition_t mbedtls_cipher_definitions[] =
 {
@@ -2087,6 +2380,23 @@ const mbedtls_cipher_definition_t mbedtls_cipher_definitions[] =
 #endif
 #endif /* MBEDTLS_DES_C */
 
+#if defined(MBEDTLS_CHACHA20_C)
+    { MBEDTLS_CIPHER_CHACHA20,             &chacha20_info },
+#endif
+
+#if defined(MBEDTLS_CHACHAPOLY_C)
+    { MBEDTLS_CIPHER_CHACHA20_POLY1305,    &chachapoly_info },
+#endif
+
+#if defined(MBEDTLS_NIST_KW_C)
+    { MBEDTLS_CIPHER_AES_128_KW,          &aes_128_nist_kw_info },
+    { MBEDTLS_CIPHER_AES_192_KW,          &aes_192_nist_kw_info },
+    { MBEDTLS_CIPHER_AES_256_KW,          &aes_256_nist_kw_info },
+    { MBEDTLS_CIPHER_AES_128_KWP,         &aes_128_nist_kwp_info },
+    { MBEDTLS_CIPHER_AES_192_KWP,         &aes_192_nist_kwp_info },
+    { MBEDTLS_CIPHER_AES_256_KWP,         &aes_256_nist_kwp_info },
+#endif
+
 #if defined(MBEDTLS_CIPHER_NULL_CIPHER)
     { MBEDTLS_CIPHER_NULL,                 &null_cipher_info },
 #endif /* MBEDTLS_CIPHER_NULL_CIPHER */
@@ -2094,7 +2404,8 @@ const mbedtls_cipher_definition_t mbedtls_cipher_definitions[] =
     { MBEDTLS_CIPHER_NONE, NULL }
 };
 
-#define NUM_CIPHERS sizeof mbedtls_cipher_definitions / sizeof mbedtls_cipher_definitions[0]
+#define NUM_CIPHERS ( sizeof(mbedtls_cipher_definitions) /      \
+                      sizeof(mbedtls_cipher_definitions[0]) )
 int mbedtls_cipher_supported[NUM_CIPHERS];
 
 #endif /* MBEDTLS_CIPHER_C */
