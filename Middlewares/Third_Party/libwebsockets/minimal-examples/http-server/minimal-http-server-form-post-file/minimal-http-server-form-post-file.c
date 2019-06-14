@@ -1,7 +1,7 @@
 /*
  * lws-minimal-http-server-form-post-file
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -16,7 +16,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
-#include <sys/fcntl.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <errno.h>
 
@@ -58,7 +58,7 @@ file_upload_cb(void *data, const char *name, const char *filename,
 		lws_filename_purify_inplace(pss->filename);
 		/* open a file of that name for write in the cwd */
 		pss->fd = lws_open(pss->filename, O_CREAT | O_TRUNC | O_RDWR, 0600);
-		if (pss->fd == LWS_INVALID_FILE) {
+		if (pss->fd == -1) {
 			lwsl_notice("Failed to open output file %s\n",
 				    pss->filename);
 			return 1;
@@ -86,7 +86,9 @@ file_upload_cb(void *data, const char *name, const char *filename,
 			  pss->file_length, pss->filename);
 
 		close(pss->fd);
-		pss->fd = LWS_INVALID_FILE;
+		pss->fd = -1;
+		break;
+	case LWS_UFS_CLOSE:
 		break;
 	}
 

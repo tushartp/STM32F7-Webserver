@@ -179,7 +179,7 @@ read:
 	// lws_buflist_describe(&wsi->buflist, wsi);
 
 	ebuf.len = (int)lws_buflist_next_segment_len(&wsi->buflist,
-						(uint8_t **)&ebuf.token);
+						&ebuf.token);
 	if (ebuf.len) {
 		lwsl_info("draining buflist (len %d)\n", ebuf.len);
 		buffered = 1;
@@ -194,9 +194,9 @@ read:
 	      (lwsi_state(wsi) != LRS_ESTABLISHED &&
 	       lwsi_state(wsi) != LRS_H2_WAITING_TO_SEND_HEADERS))) {
 
-		ebuf.token = (char *)pt->serv_buf;
+		ebuf.token = pt->serv_buf;
 		ebuf.len = lws_ssl_capable_read(wsi,
-					(unsigned char *)ebuf.token,
+					ebuf.token,
 					wsi->context->pt_serv_buf_size);
 		switch (ebuf.len) {
 		case 0:
@@ -257,10 +257,10 @@ drain:
 	if (ebuf.len) {
 		n = 0;
 		if (lwsi_role_h2(wsi) && lwsi_state(wsi) != LRS_BODY)
-			n = lws_read_h2(wsi, (unsigned char *)ebuf.token,
+			n = lws_read_h2(wsi, ebuf.token,
 				        ebuf.len);
 		else
-			n = lws_read_h1(wsi, (unsigned char *)ebuf.token,
+			n = lws_read_h1(wsi, ebuf.token,
 				        ebuf.len);
 
 		if (n < 0) {
@@ -276,32 +276,44 @@ drain:
 			if (!m) {
 				lwsl_notice("%s: removed %p from dll_buflist\n",
 					    __func__, wsi);
-				lws_dll_lws_remove(&wsi->dll_buflist);
+				lws_dll2_remove(&wsi->dll_buflist);
 			}
 		} else
 			if (n != ebuf.len) {
 				m = lws_buflist_append_segment(&wsi->buflist,
-						(uint8_t *)ebuf.token + n,
+						ebuf.token + n,
 						ebuf.len - n);
 				if (m < 0)
 					return LWS_HPI_RET_PLEASE_CLOSE_ME;
 				if (m) {
 					lwsl_debug("%s: added %p to rxflow list\n",
 							__func__, wsi);
-					lws_dll_lws_add_front(&wsi->dll_buflist,
-							&pt->dll_head_buflist);
+					lws_dll2_add_head(&wsi->dll_buflist,
+							 &pt->dll_buflist_owner);
 				}
 			}
 	}
 
 	// lws_buflist_describe(&wsi->buflist, wsi);
 
+#if 0
+
+	/*
+	 * This seems to be too aggressive... we don't want the ah stuck
+	 * there but eg, WINDOW_UPDATE may come and detach it if we leave
+	 * it like that... it will get detached at stream close
+	 */
+
 	if (wsi->http.ah
 #if !defined(LWS_NO_CLIENT)
 			&& !wsi->client_h2_alpn
 #endif
-			)
+			) {
+		lwsl_err("xxx\n");
+
 		lws_header_table_detach(wsi, 0);
+	}
+#endif
 
 	pending = lws_ssl_pending(wsi);
 	if (pending) {
@@ -491,11 +503,11 @@ rops_check_upgrades_h2(struct lws *wsi)
 	wsi->vhost->conn_stats.ws_upg++;
 	lwsl_info("Upgrade h2 to ws\n");
 	wsi->h2_stream_carries_ws = 1;
-	nwsi->ws_over_h2_count++;
+	nwsi->immortal_substream_count++;
 	if (lws_process_ws_upgrade(wsi))
 		return LWS_UPG_RET_BAIL;
 
-	if (nwsi->ws_over_h2_count == 1)
+	if (nwsi->immortal_substream_count == 1)
 		lws_set_timeout(nwsi, NO_PENDING_TIMEOUT, 0);
 
 	lws_set_timeout(wsi, NO_PENDING_TIMEOUT, 0);
@@ -675,12 +687,12 @@ rops_close_kill_connection_h2(struct lws *wsi, enum lws_close_status reason)
 			lws_free_set_NULL(wsi->h2.pending_status_body);
 	}
 
-	if (wsi->h2_stream_carries_ws) {
+	if (wsi->h2_stream_carries_ws || wsi->h2_stream_carries_sse) {
 		struct lws *nwsi = lws_get_network_wsi(wsi);
 
-		nwsi->ws_over_h2_count++;
+		nwsi->immortal_substream_count--;
 		/* if no ws, then put a timeout on the parent wsi */
-		if (!nwsi->ws_over_h2_count)
+		if (!nwsi->immortal_substream_count)
 			__lws_set_timeout(nwsi,
 				PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE, 31);
 	}
@@ -978,6 +990,9 @@ rops_perform_user_POLLOUT_h2(struct lws *wsi)
 
 			lwsl_info("  h2 action start...\n");
 			n = lws_http_action(w);
+			if (n < 0)
+				lwsl_info ("   h2 action result %d\n", n);
+			else
 			lwsl_info("  h2 action result %d "
 				  "(wsi->http.rx_content_remain %lld)\n",
 				  n, w->http.rx_content_remain);
@@ -988,13 +1003,16 @@ rops_perform_user_POLLOUT_h2(struct lws *wsi)
 			 * states.  In those cases we will hear about
 			 * END_STREAM going out in the POLLOUT handler.
 			 */
-			if (!w->h2.pending_status_body &&
+			if (n >= 0 && !w->h2.pending_status_body &&
 			    (n || w->h2.send_END_STREAM)) {
 				lwsl_info("closing stream after h2 action\n");
 				lws_close_free_wsi(w, LWS_CLOSE_STATUS_NOSTATUS,
 						   "h2 end stream");
 				wa = &wsi->h2.child_list;
 			}
+
+			if (n < 0)
+				wa = &wsi->h2.child_list;
 
 			goto next_child;
 		}
@@ -1170,7 +1188,6 @@ rops_alpn_negotiated_h2(struct lws *wsi, const char *alpn)
 
 		lwsl_info("%s: wsi %p: configured for h2\n", __func__, wsi);
 
-
 	return 0;
 }
 
@@ -1197,6 +1214,10 @@ struct lws_role_ops role_ops_h2 = {
 	/* destroy_role */		rops_destroy_role_h2,
 	/* adoption_bind */		NULL,
 	/* client_bind */		NULL,
+	/* adoption_cb clnt, srv */	{ LWS_CALLBACK_SERVER_NEW_CLIENT_INSTANTIATED,
+					  LWS_CALLBACK_SERVER_NEW_CLIENT_INSTANTIATED },
+	/* rx cb clnt, srv */		{ LWS_CALLBACK_RECEIVE_CLIENT_HTTP,
+					  0 /* may be POST, etc */ },
 	/* writeable cb clnt, srv */	{ LWS_CALLBACK_CLIENT_HTTP_WRITEABLE,
 					  LWS_CALLBACK_HTTP_WRITEABLE },
 	/* close cb clnt, srv */	{ LWS_CALLBACK_CLOSED_CLIENT_HTTP,

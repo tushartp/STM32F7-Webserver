@@ -22,6 +22,10 @@
 #define _GNU_SOURCE
 #include "core/private.h"
 
+#if defined(LWS_HAVE_MALLOC_TRIM)
+#include <malloc.h>
+#endif
+
 int
 lws_poll_listen_fd(struct lws_pollfd *fd)
 {
@@ -135,11 +139,17 @@ _lws_plat_service_tsi(struct lws_context *context, int timeout_ms, int tsi)
 	m |= !!pt->ws.rx_draining_ext_list;
 #endif
 
+#if defined(LWS_WITH_TLS)
 	if (pt->context->tls_ops &&
 	    pt->context->tls_ops->fake_POLLIN_for_buffered)
 		m |= pt->context->tls_ops->fake_POLLIN_for_buffered(pt);
+#endif
 
-	if (!m && !n) { /* nothing to do */
+	if (
+#if (defined(LWS_ROLE_WS) && !defined(LWS_WITHOUT_EXTENSIONS)) || defined(LWS_WITH_TLS)
+		!m &&
+#endif
+		!n) { /* nothing to do */
 		lws_service_fd_tsi(context, NULL, tsi);
 		lws_service_do_ripe_rxflow(pt);
 
@@ -202,5 +212,8 @@ lws_plat_service_periodic(struct lws_context *context)
 	if (context->started_with_parent &&
 	    kill(context->started_with_parent, 0) < 0)
 		kill(getpid(), SIGTERM);
+#endif
+#if defined(LWS_HAVE_MALLOC_TRIM)
+	malloc_trim(4 * 1024);
 #endif
 }

@@ -1,7 +1,7 @@
 /*
  * lws-api-test-lws_tokenize
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -15,6 +15,7 @@
 
 #include <libwebsockets.h>
 #include <string.h>
+#include <stdio.h>
 
 struct expected {
 	lws_tokenize_elem e;
@@ -157,6 +158,12 @@ struct expected expected1[] = {
 		{ LWS_TOKZE_DELIMITER, ".", 1 },
 		{ LWS_TOKZE_TOKEN, "com", 3 },
 		{ LWS_TOKZE_ENDED, "", 0 },
+	},
+	expected15[] = {
+		{ LWS_TOKZE_TOKEN, "close", 5 },
+		{ LWS_TOKZE_DELIMITER, ",", 1 },
+		{ LWS_TOKZE_TOKEN, "Upgrade", 7 },
+		{ LWS_TOKZE_ENDED, "", 0 },
 	}
 
 ;
@@ -225,6 +232,11 @@ struct tests tests[] = {
 		"1.myserver.com",
 		expected14, LWS_ARRAY_SIZE(expected14),
 		LWS_TOKENIZE_F_NO_FLOATS
+	},
+	{
+		"close,  Upgrade",
+		expected15, LWS_ARRAY_SIZE(expected15),
+		LWS_TOKENIZE_F_COMMA_SEP_LIST
 	},
 };
 
@@ -307,7 +319,8 @@ int main(int argc, const char **argv)
 			if (e > 0 &&
 			    (ts.token_len != exp->len ||
 			     memcmp(exp->value, ts.token, exp->len))) {
-				lwsl_notice("fail token mismatch\n");
+				lwsl_notice("fail token mismatch %d %d %.*s\n",
+						ts.token_len, exp->len, ts.token_len, ts.token);
 				fail++;
 				break;
 			}

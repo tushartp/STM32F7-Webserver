@@ -128,38 +128,14 @@ _lws_plat_file_write(lws_fop_fd_t fops_fd, lws_filepos_t *amount,
 
 	return 0;
 }
-/*
+
+#if defined(LWS_AMAZON_RTOS) || defined(LWS_WITH_STM32)
 int
 lws_find_string_in_file(const char *filename, const char *string, int stringlen)
 {
-	nvs_handle nvh;
-	size_t s;
-	int n;
-	char buf[64], result[64];
-	const char *p = strchr(string, ':'), *q;
-
-	if (!p)
-		return 0;
-
-	q = string;
-	n = 0;
-	while (n < sizeof(buf) - 1 && q != p)
-		buf[n++] = *q++;
-	buf[n] = '\0';
-
-	ESP_ERROR_CHECK(nvs_open(filename, NVS_READWRITE, &nvh));
-
-	s = sizeof(result) - 1;
-	n = nvs_get_str(nvh, buf, result, &s);
-	nvs_close(nvh);
-
-	if (n != ESP_OK)
-		return 0;
-
-	return !strcmp(p + 1, result);
+    return 0;
 }
-*/
-
+#else
 int
 lws_find_string_in_file(const char *filename, const char *string, int stringlen)
 {
@@ -203,7 +179,9 @@ lws_find_string_in_file(const char *filename, const char *string, int stringlen)
 
 	return hit;
 }
+#endif
 
+#if !defined(LWS_AMAZON_RTOS) && !defined(LWS_WITH_STM32)
 LWS_VISIBLE int
 lws_plat_write_file(const char *filename, void *buf, int len)
 {
@@ -245,4 +223,4 @@ lws_plat_read_file(const char *filename, void *buf, int len)
 
 	return n;
 }
-
+#endif /* LWS_AMAZON_RTOS */

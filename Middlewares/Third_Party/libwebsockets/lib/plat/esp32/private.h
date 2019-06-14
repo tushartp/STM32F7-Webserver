@@ -24,7 +24,13 @@
 #define MSG_NOSIGNAL 0
 #define SOMAXCONN 3
 
+#if defined(LWS_AMAZON_RTOS)
+ int
+ open(const char *path, int oflag, ...);
+#else
  #include <fcntl.h>
+#endif
+
  #include <strings.h>
  #include <unistd.h>
  #include <sys/stat.h>
@@ -37,12 +43,23 @@
  #endif
  #include <netdb.h>
  #include <signal.h>
+#if defined(LWS_AMAZON_RTOS)
+const char *
+gai_strerror(int);
+#else
  #include <sys/socket.h>
+#endif
 
+#if defined(LWS_AMAZON_RTOS)
+ #include "FreeRTOS.h"
+ #include "timers.h"
+ #include <esp_attr.h>
+#else
 #include "freertos/timers.h"
 #include <esp_attr.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
+#endif
 
 #include "lwip/apps/sntp.h"
 
@@ -63,8 +80,6 @@
  #define LWS_EADDRINUSE EADDRINUSE
 
  #define lws_set_blocking_send(wsi)
-
- #define LWS_SOCK_INVALID (-1)
 
  #ifndef LWS_NO_FORK
   #ifdef LWS_HAVE_SYS_PRCTL_H

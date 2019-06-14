@@ -1,7 +1,7 @@
 /*
  * libwebsockets-test-server - libwebsockets test implementation
  *
- * Copyright (C) 2010-2016 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -181,7 +181,7 @@ callback_lws_status(struct lws *wsi, enum lws_callback_reasons reason,
 		case WALK_FINAL:
 walk_final:
 			n = LWS_WRITE_CONTINUATION;
-			p += sprintf(p, "]}");
+			p += lws_snprintf(p, 4, "]}");
 			if (pss->changed_partway) {
 				pss->changed_partway = 0;
 				pss->subsequent = 0;

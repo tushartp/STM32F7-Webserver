@@ -1,7 +1,7 @@
 /*
  * libwebsockets - mbedTLS-specific lws apis
  *
- * Copyright (C) 2010-2017 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -20,24 +20,8 @@
  */
 
 #include "core/private.h"
-#include <mbedtls/oid.h>
+#include "tls/mbedtls/private.h"
 
-void
-lws_ssl_elaborate_error(void)
-{
-}
-
-int
-lws_context_init_ssl_library(const struct lws_context_creation_info *info)
-{
-	lwsl_info(" Compiled with MbedTLS support\n");
-
-	if (!lws_check_opt(info->options, LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT))
-		lwsl_info(" SSL disabled: no "
-			  "LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT\n");
-
-	return 0;
-}
 
 LWS_VISIBLE void
 lws_ssl_destroy(struct lws_vhost *vhost)
@@ -141,11 +125,10 @@ lws_ssl_capable_read(struct lws *wsi, unsigned char *buf, int len)
 		goto bail;
 
 	if (SSL_pending(wsi->tls.ssl) &&
-	    lws_dll_is_null(&wsi->tls.pending_tls_list)) {
-
-		lws_dll_lws_add_front(&wsi->tls.pending_tls_list,
-				      &pt->tls.pending_tls_head);
-	}
+	    lws_dll_is_detached(&wsi->tls.dll_pending_tls,
+				&pt->tls.dll_pending_tls_head))
+		lws_dll_add_head(&wsi->tls.dll_pending_tls,
+				 &pt->tls.dll_pending_tls_head);
 
 	return n;
 bail:
@@ -326,168 +309,6 @@ __lws_tls_shutdown(struct lws *wsi)
 	}
 }
 
-static time_t
-lws_tls_mbedtls_time_to_unix(mbedtls_x509_time *xtime)
-{
-	struct tm t;
-
-	if (!xtime || !xtime->year || xtime->year < 0)
-		return (time_t)(long long)-1;
-
-	memset(&t, 0, sizeof(t));
-
-	t.tm_year = xtime->year - 1900;
-	t.tm_mon = xtime->mon - 1; /* mbedtls months are 1+, tm are 0+ */
-	t.tm_mday = xtime->day - 1; /* mbedtls days are 1+, tm are 0+ */
-	t.tm_hour = xtime->hour;
-	t.tm_min = xtime->min;
-	t.tm_sec = xtime->sec;
-	t.tm_isdst = -1;
-
-	return mktime(&t);
-}
-
-static int
-lws_tls_mbedtls_get_x509_name(mbedtls_x509_name *name,
-			      union lws_tls_cert_info_results *buf, size_t len)
-{
-	while (name) {
-		if (MBEDTLS_OID_CMP(MBEDTLS_OID_AT_CN, &name->oid)) {
-			name = name->next;
-			continue;
-		}
-
-		if (len - 1 < name->val.len)
-			return -1;
-
-		memcpy(&buf->ns.name[0], name->val.p, name->val.len);
-		buf->ns.name[name->val.len] = '\0';
-		buf->ns.len = name->val.len;
-
-		return 0;
-	}
-
-	return -1;
-}
-
-static int
-lws_tls_mbedtls_cert_info(mbedtls_x509_crt *x509, enum lws_tls_cert_info type,
-			  union lws_tls_cert_info_results *buf, size_t len)
-{
-	if (!x509)
-		return -1;
-
-	switch (type) {
-	case LWS_TLS_CERT_INFO_VALIDITY_FROM:
-		buf->time = lws_tls_mbedtls_time_to_unix(&x509->valid_from);
-		if (buf->time == (time_t)(long long)-1)
-			return -1;
-		break;
-
-	case LWS_TLS_CERT_INFO_VALIDITY_TO:
-		buf->time = lws_tls_mbedtls_time_to_unix(&x509->valid_to);
-		if (buf->time == (time_t)(long long)-1)
-			return -1;
-		break;
-
-	case LWS_TLS_CERT_INFO_COMMON_NAME:
-		return lws_tls_mbedtls_get_x509_name(&x509->subject, buf, len);
-
-	case LWS_TLS_CERT_INFO_ISSUER_NAME:
-		return lws_tls_mbedtls_get_x509_name(&x509->issuer, buf, len);
-
-	case LWS_TLS_CERT_INFO_USAGE:
-		buf->usage = x509->key_usage;
-		break;
-
-	case LWS_TLS_CERT_INFO_OPAQUE_PUBLIC_KEY:
-	{
-		char *p = buf->ns.name;
-		size_t r = len, u;
-
-		switch (mbedtls_pk_get_type(&x509->pk)) {
-		case MBEDTLS_PK_RSA:
-		{
-			mbedtls_rsa_context *rsa = mbedtls_pk_rsa(x509->pk);
-
-			if (mbedtls_mpi_write_string(&rsa->N, 16, p, r, &u))
-				return -1;
-			r -= u;
-			p += u;
-			if (mbedtls_mpi_write_string(&rsa->E, 16, p, r, &u))
-				return -1;
-
-			p += u;
-			buf->ns.len = lws_ptr_diff(p, buf->ns.name);
-			break;
-		}
-		case MBEDTLS_PK_ECKEY:
-		{
-			mbedtls_ecp_keypair *ecp = mbedtls_pk_ec(x509->pk);
-
-			if (mbedtls_mpi_write_string(&ecp->Q.X, 16, p, r, &u))
-				 return -1;
-			r -= u;
-			p += u;
-			if (mbedtls_mpi_write_string(&ecp->Q.Y, 16, p, r, &u))
-				 return -1;
-			r -= u;
-			p += u;
-			if (mbedtls_mpi_write_string(&ecp->Q.Z, 16, p, r, &u))
-				 return -1;
-			p += u;
-			buf->ns.len = lws_ptr_diff(p, buf->ns.name);
-			break;
-		}
-		default:
-			lwsl_notice("%s: x509 has unsupported pubkey type %d\n",
-				    __func__,
-				    mbedtls_pk_get_type(&x509->pk));
-
-			return -1;
-		}
-		break;
-	}
-
-	default:
-		return -1;
-	}
-
-	return 0;
-}
-
-LWS_VISIBLE LWS_EXTERN int
-lws_tls_vhost_cert_info(struct lws_vhost *vhost, enum lws_tls_cert_info type,
-		        union lws_tls_cert_info_results *buf, size_t len)
-{
-	mbedtls_x509_crt *x509 = ssl_ctx_get_mbedtls_x509_crt(vhost->tls.ssl_ctx);
-
-	return lws_tls_mbedtls_cert_info(x509, type, buf, len);
-}
-
-LWS_VISIBLE int
-lws_tls_peer_cert_info(struct lws *wsi, enum lws_tls_cert_info type,
-		       union lws_tls_cert_info_results *buf, size_t len)
-{
-	mbedtls_x509_crt *x509;
-
-	wsi = lws_get_network_wsi(wsi);
-
-	x509 = ssl_get_peer_mbedtls_x509_crt(wsi->tls.ssl);
-
-	if (!x509)
-		return -1;
-
-	switch (type) {
-	case LWS_TLS_CERT_INFO_VERIFIED:
-		buf->verified = SSL_get_verify_result(wsi->tls.ssl) == X509_V_OK;
-		return 0;
-	default:
-		return lws_tls_mbedtls_cert_info(x509, type, buf, len);
-	}
-
-	return -1;
-}
 
 static int
 tops_fake_POLLIN_for_buffered_mbedtls(struct lws_context_per_thread *pt)

@@ -92,7 +92,7 @@ lws_ws_handshake_client(struct lws *wsi, unsigned char **buf, size_t len)
 			 * to place it at the cache head, not the tail as usual.
 			 */
 			if (lws_rxflow_cache(wsi, *buf, 0, (int)len) ==
-							LWSRXFC_TRIMMED)
+							LWSRXFC_TRIMMED) {
 				/*
 				 * we dealt with it by trimming the existing
 				 * rxflow cache HEAD to account for what we used.
@@ -100,9 +100,11 @@ lws_ws_handshake_client(struct lws *wsi, unsigned char **buf, size_t len)
 				 * indicate we didn't use anything to the caller
 				 * so he doesn't do any consumed processing
 				 */
+				lwsl_info("%s: trimming inside rxflow cache\n",
+						__func__);
 				*buf = bufin;
-			else
-			*buf += len;
+			} else
+				*buf += len;
 
 			return 0;
 		}
@@ -110,7 +112,7 @@ lws_ws_handshake_client(struct lws *wsi, unsigned char **buf, size_t len)
 		if (wsi->ws->rx_draining_ext) {
 			int m;
 
-			//lwsl_notice("%s: draining ext\n", __func__);
+			lwsl_info("%s: draining ext\n", __func__);
 			if (lwsi_role_client(wsi))
 				m = lws_ws_client_rx_sm(wsi, 0);
 			else
@@ -120,7 +122,10 @@ lws_ws_handshake_client(struct lws *wsi, unsigned char **buf, size_t len)
 			continue;
 		}
 #endif
-		/* caller will account for buflist usage */
+		/*
+		 * caller will account for buflist usage by studying what
+		 * happened to *buf
+		 */
 
 		if (lws_ws_client_rx_sm(wsi, *(*buf)++)) {
 			lwsl_notice("%s: client_rx_sm exited, DROPPING %d\n",
@@ -329,9 +334,17 @@ bad_conn_format:
 	if (!len) {
 		lwsl_info("%s: WSI_TOKEN_PROTOCOL is null\n", __func__);
 		/*
-		 * no protocol name to work from,
+		 * no protocol name to work from, if we don't already have one
 		 * default to first protocol
 		 */
+
+		if (wsi->protocol) {
+			p = (char *)wsi->protocol->name;
+			goto identify_protocol;
+		}
+
+		/* no choice but to use the default protocol */
+
 		n = 0;
 		wsi->protocol = &wsi->vhost->protocols[0];
 		goto check_extensions;
@@ -357,6 +370,13 @@ bad_conn_format:
 		*cce = "HS: PROTOCOL malformed";
 		goto bail2;
 	}
+
+identify_protocol:
+
+#if defined(LWS_WITH_HTTP_PROXY)
+	lws_strncpy(wsi->ws->actual_protocol, p,
+		    sizeof(wsi->ws->actual_protocol));
+#endif
 
 	/*
 	 * identify the selected protocol struct and set it

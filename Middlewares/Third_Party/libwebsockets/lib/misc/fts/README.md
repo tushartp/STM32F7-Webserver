@@ -135,8 +135,6 @@ Peak alloc|3MiB
 Serialization time|1ms
 Trie File size|1.4MiB
  
-So the peak memory requirement to generate the whole trie in memory for that
-first is around 4x the size of the final output file.
 
 Once it's generated, querying the trie file is very inexpensive, even when there
 are lots of results.

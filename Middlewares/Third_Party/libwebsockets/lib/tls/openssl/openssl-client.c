@@ -21,6 +21,13 @@
 
 #include "core/private.h"
 
+#include "tls/openssl/private.h"
+
+/*
+ * Care: many openssl apis return 1 for success.  These are translated to the
+ * lws convention of 0 for success.
+ */
+
 int lws_openssl_describe_cipher(struct lws *wsi);
 
 extern int openssl_websocket_private_data_index,
@@ -44,6 +51,12 @@ OpenSSL_client_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
 					SSL_get_ex_data_X509_STORE_CTX_idx());
 			wsi = SSL_get_ex_data(ssl,
 					openssl_websocket_private_data_index);
+			if (!wsi) {
+				lwsl_err("%s: can't get wsi from ssl privdata\n",
+					 __func__);
+
+				return 0;
+			}
 
 			if ((err == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT ||
 			     err == X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN) &&
@@ -72,6 +85,11 @@ OpenSSL_client_verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx)
 	ssl = X509_STORE_CTX_get_ex_data(x509_ctx,
 					 SSL_get_ex_data_X509_STORE_CTX_idx());
 	wsi = SSL_get_ex_data(ssl, openssl_websocket_private_data_index);
+	if (!wsi) {
+		lwsl_err("%s: can't get wsi from ssl privdata\n",  __func__);
+
+		return 0;
+	}
 
 	n = lws_get_context_protocol(wsi->context, 0).callback(wsi,
 			LWS_CALLBACK_OPENSSL_PERFORM_SERVER_CERT_VERIFICATION,
@@ -142,7 +160,7 @@ lws_ssl_client_bio_create(struct lws *wsi)
 	if (!wsi->tls.ssl) {
 		lwsl_err("SSL_new failed: %s\n",
 		         ERR_error_string(lws_ssl_get_error(wsi, 0), NULL));
-		lws_ssl_elaborate_error();
+		lws_tls_err_describe();
 		return -1;
 	}
 
@@ -160,7 +178,7 @@ lws_ssl_client_bio_create(struct lws *wsi)
 					X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
 		// Handle the case where the hostname is an IP address.
 		if (!X509_VERIFY_PARAM_set1_ip_asc(param, hostname))
-		X509_VERIFY_PARAM_set1_host(param, hostname, 0);
+			X509_VERIFY_PARAM_set1_host(param, hostname, 0);
 	}
 #endif
 
@@ -338,7 +356,7 @@ lws_tls_client_confirm_peer_cert(struct lws *wsi, char *ebuf, int ebuf_len)
 		"server's cert didn't look good, X509_V_ERR = %d: %s\n",
 		 n, ERR_error_string(n, sb));
 	lwsl_info("%s\n", ebuf);
-	lws_ssl_elaborate_error();
+	lws_tls_err_describe();
 
 	return -1;
 
@@ -355,14 +373,21 @@ lws_tls_client_create_vhost_context(struct lws_vhost *vh,
 				    const void *ca_mem,
 				    unsigned int ca_mem_len,
 				    const char *cert_filepath,
+				    const void *cert_mem,
+				    unsigned int cert_mem_len,
 				    const char *private_key_filepath)
 {
-	SSL_METHOD *method;
-	unsigned long error;
-	int n;
-	const unsigned char **ca_mem_ptr;
-	X509 *client_CA;
+	struct lws_tls_client_reuse *tcr;
+	const unsigned char *ca_mem_ptr;
 	X509_STORE *x509_store;
+	unsigned long error;
+	SSL_METHOD *method;
+	EVP_MD_CTX *mdctx;
+	unsigned int len;
+	uint8_t hash[32];
+	X509 *client_CA;
+	char c;
+	int n;
 
 	/* basic openssl init already happened in context init */
 
@@ -382,7 +407,95 @@ lws_tls_client_create_vhost_context(struct lws_vhost *vh,
 				      (char *)vh->context->pt[0].serv_buf));
 		return 1;
 	}
-	/* create context */
+
+	/*
+	 * OpenSSL client contexts are quite expensive, because they bring in
+	 * the system certificate bundle for each one.  So if you have multiple
+	 * vhosts, each with a client context, it can add up to several
+	 * megabytes of heap.  In the case the client contexts are configured
+	 * identically, they could perfectly well have shared just the one.
+	 *
+	 * For that reason, use a hash to fingerprint the context configuration
+	 * and prefer to reuse an existing one with the same fingerprint if
+	 * possible.
+	 */
+
+	 mdctx = EVP_MD_CTX_create();
+	 if (!mdctx)
+		 return 1;
+
+	if (EVP_DigestInit_ex(mdctx, EVP_sha256(), NULL) != 1) {
+		EVP_MD_CTX_destroy(mdctx);
+
+		return 1;
+	}
+
+	if (info->ssl_client_options_set)
+		EVP_DigestUpdate(mdctx, &info->ssl_client_options_set,
+				 sizeof(info->ssl_client_options_set));
+
+#if (OPENSSL_VERSION_NUMBER >= 0x009080df) && !defined(USE_WOLFSSL)
+	if (info->ssl_client_options_clear)
+		EVP_DigestUpdate(mdctx, &info->ssl_client_options_clear,
+				 sizeof(info->ssl_client_options_clear));
+#endif
+
+	if (cipher_list)
+		EVP_DigestUpdate(mdctx, cipher_list, strlen(cipher_list));
+
+#if defined(LWS_HAVE_SSL_CTX_set_ciphersuites)
+	if (info->client_tls_1_3_plus_cipher_list)
+		EVP_DigestUpdate(mdctx, info->client_tls_1_3_plus_cipher_list,
+				 strlen(info->client_tls_1_3_plus_cipher_list));
+#endif
+
+	if (!lws_check_opt(vh->options, LWS_SERVER_OPTION_DISABLE_OS_CA_CERTS)) {
+		c = 1;
+		EVP_DigestUpdate(mdctx, &c, 1);
+	}
+
+	if (ca_filepath)
+		EVP_DigestUpdate(mdctx, ca_filepath, strlen(ca_filepath));
+
+	if (cert_filepath)
+		EVP_DigestUpdate(mdctx, cert_filepath, strlen(cert_filepath));
+
+	if (private_key_filepath)
+		EVP_DigestUpdate(mdctx, private_key_filepath,
+				 strlen(private_key_filepath));
+	if (ca_mem && ca_mem_len)
+		EVP_DigestUpdate(mdctx, ca_mem, ca_mem_len);
+
+	if (cert_mem && cert_mem_len)
+		EVP_DigestUpdate(mdctx, cert_mem, cert_mem_len);
+
+	len = sizeof(hash);
+	EVP_DigestFinal_ex(mdctx, hash, &len);
+	EVP_MD_CTX_destroy(mdctx);
+
+	/* look for existing client context with same config already */
+
+	lws_start_foreach_dll_safe(struct lws_dll *, p, tp,
+				   vh->context->tls.cc_head.next) {
+		tcr = lws_container_of(p, struct lws_tls_client_reuse, cc_list);
+
+		if (!memcmp(hash, tcr->hash, len)) {
+
+			/* it's a match */
+
+			tcr->refcount++;
+			vh->tls.ssl_client_ctx = tcr->ssl_client_ctx;
+
+			lwsl_info("%s: vh %s: reusing client ctx %d: use %d\n",
+				   __func__, vh->name, tcr->index,
+				   tcr->refcount);
+
+			return 0;
+		}
+	} lws_end_foreach_dll_safe(p, tp);
+
+	/* no existing one the same... create new client SSL_CTX */
+
 	vh->tls.ssl_client_ctx = SSL_CTX_new(method);
 	if (!vh->tls.ssl_client_ctx) {
 		error = ERR_get_error();
@@ -392,12 +505,37 @@ lws_tls_client_create_vhost_context(struct lws_vhost *vh,
 		return 1;
 	}
 
+	tcr = lws_zalloc(sizeof(*tcr), "client ctx tcr");
+	if (!tcr) {
+		SSL_CTX_free(vh->tls.ssl_client_ctx);
+		return 1;
+	}
+
+	tcr->ssl_client_ctx = vh->tls.ssl_client_ctx;
+	tcr->refcount = 1;
+	memcpy(tcr->hash, hash, len);
+	tcr->index = vh->context->tls.count_client_contexts++;
+	lws_dll_add_front(&tcr->cc_list, &vh->context->tls.cc_head);
+
+	lwsl_info("%s: vh %s: created new client ctx %d\n", __func__,
+			vh->name, tcr->index);
+
+	/* bind the tcr to the client context */
+
+	SSL_CTX_set_ex_data(vh->tls.ssl_client_ctx,
+			    openssl_SSL_CTX_private_data_index,
+			    (char *)tcr);
+
 #ifdef SSL_OP_NO_COMPRESSION
 	SSL_CTX_set_options(vh->tls.ssl_client_ctx, SSL_OP_NO_COMPRESSION);
 #endif
 
 	SSL_CTX_set_options(vh->tls.ssl_client_ctx,
 			    SSL_OP_CIPHER_SERVER_PREFERENCE);
+
+	SSL_CTX_set_mode(vh->tls.ssl_client_ctx,
+			 SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |
+			 SSL_MODE_RELEASE_BUFFERS);
 
 	if (info->ssl_client_options_set)
 		SSL_CTX_set_options(vh->tls.ssl_client_ctx,
@@ -440,20 +578,20 @@ lws_tls_client_create_vhost_context(struct lws_vhost *vh,
 				"Unable to load SSL Client certs "
 				"file from %s -- client ssl isn't "
 				"going to work\n", ca_filepath);
-			lws_ssl_elaborate_error();
+			lws_tls_err_describe();
 		}
 		else
 			lwsl_info("loaded ssl_ca_filepath\n");
 	} else {
-		ca_mem_ptr = (const unsigned char**)&ca_mem;
-		client_CA = d2i_X509(NULL, ca_mem_ptr, ca_mem_len);
+		ca_mem_ptr = (const unsigned char*)ca_mem;
+		client_CA = d2i_X509(NULL, &ca_mem_ptr, ca_mem_len);
 		x509_store = X509_STORE_new();
 		if (!client_CA || !X509_STORE_add_cert(x509_store, client_CA)) {
 			X509_STORE_free(x509_store);
 			lwsl_err("Unable to load SSL Client certs from "
 				 "ssl_ca_mem -- client ssl isn't going to "
 				 "work\n");
-			lws_ssl_elaborate_error();
+			lws_tls_err_describe();
 		} else {
 			/* it doesn't increment x509_store ref counter */
 			SSL_CTX_set_cert_store(vh->tls.ssl_client_ctx,
@@ -483,10 +621,19 @@ lws_tls_client_create_vhost_context(struct lws_vhost *vh,
 		if (n < 1) {
 			lwsl_err("problem %d getting cert '%s'\n", n,
 				 cert_filepath);
-			lws_ssl_elaborate_error();
+			lws_tls_err_describe();
 			return 1;
 		}
 		lwsl_notice("Loaded client cert %s\n", cert_filepath);
+	} else if (cert_mem && cert_mem_len) {
+		n = SSL_CTX_use_certificate_ASN1(vh->tls.ssl_client_ctx,
+						 cert_mem_len, cert_mem);
+		if (n < 1) {
+			lwsl_err("%s: problem interpreting client cert\n",
+				 __func__);
+			lws_tls_err_describe();
+			return 1;
+		}
 	}
 	if (private_key_filepath) {
 		lwsl_notice("%s: doing private key filepath\n", __func__);
@@ -496,7 +643,7 @@ lws_tls_client_create_vhost_context(struct lws_vhost *vh,
 		    private_key_filepath, SSL_FILETYPE_PEM) != 1) {
 			lwsl_err("use_PrivateKey_file '%s'\n",
 				 private_key_filepath);
-			lws_ssl_elaborate_error();
+			lws_tls_err_describe();
 			return 1;
 		}
 		lwsl_notice("Loaded client cert private key %s\n",

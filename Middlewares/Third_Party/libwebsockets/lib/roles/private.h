@@ -232,6 +232,16 @@ struct lws_role_ops {
 			   const struct lws_client_connect_info *i);
 
 	/*
+	 * the callback reasons for adoption for client, server
+	 * (just client applies if no concept of client or server)
+	 */
+	uint16_t adoption_cb[2];
+	/*
+	 * the callback reasons for adoption for client, server
+	 * (just client applies if no concept of client or server)
+	 */
+	uint16_t rx_cb[2];
+	/*
 	 * the callback reasons for WRITEABLE for client, server
 	 * (just client applies if no concept of client or server)
 	 */
@@ -297,6 +307,12 @@ extern struct lws_role_ops role_ops_raw_skt, role_ops_raw_file, role_ops_listen,
  #define lwsi_role_dbus(wsi) (0)
 #endif
 
+#if defined(LWS_ROLE_RAW_PROXY)
+ #include "roles/raw-proxy/private.h"
+#else
+ #define lwsi_role_raw_proxy(wsi) (0)
+#endif
+
 enum {
 	LWS_HP_RET_BAIL_OK,
 	LWS_HP_RET_BAIL_DIE,
@@ -313,3 +329,6 @@ enum {
 
 int
 lws_role_call_adoption_bind(struct lws *wsi, int type, const char *prot);
+
+struct lws *
+lws_client_connect_3(struct lws *wsi, struct lws *wsi_piggyback, ssize_t plen);

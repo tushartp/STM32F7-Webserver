@@ -24,7 +24,13 @@
 //#define MSG_NOSIGNAL 0
 #define SOMAXCONN 3
 
+#if defined(LWS_AMAZON_RTOS) || defined(LWS_WITH_STM32)
+ int
+ open(const char *path, int oflag, ...);
+#else
  #include <fcntl.h>
+#endif
+
  #include <strings.h>
  #include <unistd.h>
  #include <sys/stat.h>
@@ -37,7 +43,13 @@
  #endif
  #include <netdb.h>
  #include <signal.h>
+#if defined(LWS_WITH_STM32)
+const char *
+gai_strerror(int);
+#else
  #include <sys/socket.h>
+#endif
+//#include <sys/socket.h>
 
 #include "FreeRTOS.h"
 #include "timers.h"

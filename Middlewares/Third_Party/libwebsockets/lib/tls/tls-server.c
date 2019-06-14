@@ -98,6 +98,7 @@ lws_tls_server_conn_alpn(struct lws *wsi)
 	return 0;
 }
 
+#if !defined(LWS_NO_SERVER)
 LWS_VISIBLE int
 lws_context_init_server_ssl(const struct lws_context_creation_info *info,
 			    struct lws_vhost *vhost)
@@ -113,14 +114,14 @@ lws_context_init_server_ssl(const struct lws_context_creation_info *info,
 	}
 
 	/*
-	 * If he is giving a cert filepath, take it as a sign he wants to use
+	 * If he is giving a server cert, take it as a sign he wants to use
 	 * it on this vhost.  User code can leave the cert filepath NULL and
 	 * set the LWS_SERVER_OPTION_CREATE_VHOST_SSL_CTX option itself, in
 	 * which case he's expected to set up the cert himself at
 	 * LWS_CALLBACK_OPENSSL_LOAD_EXTRA_SERVER_VERIFY_CERTS, which
 	 * provides the vhost SSL_CTX * in the user parameter.
 	 */
-	if (info->ssl_cert_filepath)
+	if (info->ssl_cert_filepath || info->server_ssl_cert_mem)
 		vhost->options |= LWS_SERVER_OPTION_CREATE_VHOST_SSL_CTX;
 
 	if (info->port != CONTEXT_PORT_NO_LISTEN) {
@@ -176,6 +177,7 @@ lws_context_init_server_ssl(const struct lws_context_creation_info *info,
 
 	return 0;
 }
+#endif
 
 LWS_VISIBLE int
 lws_server_socket_service_ssl(struct lws *wsi, lws_sockfd_type accept_fd)
@@ -255,12 +257,31 @@ lws_server_socket_service_ssl(struct lws *wsi, lws_sockfd_type accept_fd)
 			n = recv(wsi->desc.sockfd, (char *)pt->serv_buf,
 				 context->pt_serv_buf_size, MSG_PEEK);
 
-		/*
-		 * optionally allow non-SSL connect on SSL listening socket
-		 * This is disabled by default, if enabled it goes around any
-		 * SSL-level access control (eg, client-side certs) so leave
-		 * it disabled unless you know it's not a problem for you
-		 */
+			/*
+			 * We have LWS_SERVER_OPTION_ALLOW_NON_SSL_ON_SSL_PORT..
+			 * this just means don't hang up on him because of no
+			 * tls hello... what happens next is driven by
+			 * additional option flags:
+			 *
+			 * none: fail the connection
+			 *
+			 * LWS_SERVER_OPTION_REDIRECT_HTTP_TO_HTTPS:
+			 *     Destroy the TLS, issue a redirect using plaintext
+			 *     http (this may not be accepted by a client that
+			 *     has visited the site before and received an STS
+			 *     header).
+			 *
+			 * LWS_SERVER_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER:
+			 *     Destroy the TLS, continue and serve normally
+			 *     using http
+			 *
+			 * LWS_SERVER_OPTION_FALLBACK_TO_APPLY_LISTEN_ACCEPT_CONFIG:
+			 *     Destroy the TLS, apply whatever role and protocol
+			 *     were told in the vhost info struct
+			 *     .listen_accept_role / .listen_accept_protocol and
+			 *     continue with that
+			 */
+
 			if (n >= 1 && pt->serv_buf[0] >= ' ') {
 				/*
 				* TLS content-type for Handshake is 0x16, and
@@ -276,16 +297,40 @@ lws_server_socket_service_ssl(struct lws *wsi, lws_sockfd_type accept_fd)
 
 				lws_tls_server_abort_connection(wsi);
 				/*
-				 * care... this creates wsi with no ssl
-				 * when ssl is enabled and normally
-				 * mandatory
+				 * care... this creates wsi with no ssl when ssl
+				 * is enabled and normally mandatory
 				 */
 				wsi->tls.ssl = NULL;
-				if (lws_check_opt(context->options,
-				    LWS_SERVER_OPTION_REDIRECT_HTTP_TO_HTTPS))
+
+				if (lws_check_opt(wsi->vhost->options,
+				    LWS_SERVER_OPTION_REDIRECT_HTTP_TO_HTTPS)) {
+					lwsl_info("%s: redirecting from http "
+						  "to https\n", __func__);
 					wsi->tls.redirect_to_https = 1;
-				lwsl_debug("accepted as non-ssl\n");
-				goto accepted;
+					goto notls_accepted;
+				}
+
+				if (lws_check_opt(wsi->vhost->options,
+				LWS_SERVER_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER)) {
+					lwsl_info("%s: allowing unencrypted "
+						  "http service on tls port\n",
+						  __func__);
+					goto notls_accepted;
+				}
+
+				if (lws_check_opt(wsi->vhost->options,
+		    LWS_SERVER_OPTION_FALLBACK_TO_APPLY_LISTEN_ACCEPT_CONFIG)) {
+					if (lws_http_to_fallback(wsi, NULL, 0))
+						goto fail;
+					lwsl_info("%s: allowing non-tls "
+						  "fallback\n", __func__);
+					goto notls_accepted;
+				}
+
+				lwsl_notice("%s: client did not send a valid "
+					    "tls hello (default vhost %s)\n",
+					    __func__, wsi->vhost->name);
+				goto fail;
 			}
 			if (!n) {
 				/*
@@ -355,8 +400,6 @@ lws_server_socket_service_ssl(struct lws *wsi, lws_sockfd_type accept_fd)
 		wsi->accept_start_us = lws_time_in_microseconds();
 #endif
 
-accepted:
-
 		/* adapt our vhost to match the SNI SSL_CTX that was chosen */
 		vh = context->vhost_list;
 		while (vh) {
@@ -382,6 +425,11 @@ accepted:
 	default:
 		break;
 	}
+
+	return 0;
+
+notls_accepted:
+	lwsi_set_state(wsi, LRS_ESTABLISHED);
 
 	return 0;
 

@@ -68,6 +68,7 @@ typedef enum {
 	LWS_ADOPT_SOCKET = 2,		/* flag: absent implies file descr */
 	LWS_ADOPT_ALLOW_SSL = 4,	/* flag: if set requires LWS_ADOPT_SOCKET */
 	LWS_ADOPT_FLAG_UDP = 16,	/* flag: socket is UDP */
+	LWS_ADOPT_FLAG_RAW_PROXY = 32,	/* flag: raw proxy */
 
 	LWS_ADOPT_RAW_SOCKET_UDP = LWS_ADOPT_SOCKET | LWS_ADOPT_FLAG_UDP,
 } lws_adoption_type;
@@ -77,7 +78,7 @@ typedef union {
 	lws_filefd_type filefd;
 } lws_sock_file_fd_type;
 
-#if !defined(LWS_WITH_ESP32) && !defined(LWS_WITH_STM32)
+#if !defined(LWS_WITH_ESP32) && !defined(LWS_PLAT_OPTEE) && !defined(LWS_WITH_STM32)
 struct lws_udp {
 	struct sockaddr sa;
 	socklen_t salen;
@@ -87,7 +88,7 @@ struct lws_udp {
 };
 #endif
 
-/*
+/**
 * lws_adopt_descriptor_vhost() - adopt foreign socket or file descriptor
 * if socket descriptor, should already have been accepted from listen socket
 *

@@ -446,6 +446,17 @@ lws_h2_settings(struct lws *wsi, struct http2_settings *settings,
 					      "Inital Window beyond max");
 				return 1;
 			}
+
+#if defined(LWS_AMAZON_RTOS) || defined(LWS_AMAZON_NOART)
+			//FIXME: Workaround for FIRMWARE-4632 until cloud-side issue is fixed.
+			if (b == 0x7fffffff) {
+				b = 65535;
+				lwsl_info("init window size 0x7fffffff\n");
+				break;
+			}
+			//FIXME: end of FIRMWARE-4632 workaround
+#endif
+
 			/*
 			 * In addition to changing the flow-control window for
 			 * streams that are not yet active, a SETTINGS frame
@@ -822,8 +833,13 @@ lws_h2_parse_frame_header(struct lws *wsi)
 	}
 
 	/* let the network wsi live a bit longer if subs are active */
-	if (!wsi->ws_over_h2_count)
+
+	if (!wsi->immortal_substream_count)
+#if defined(LWS_AMAZON_RTOS) || defined(LWS_AMAZON_NOART)
+		lws_set_timeout(wsi, PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE, wsi->vhost->keepalive_timeout);
+#else
 		lws_set_timeout(wsi, PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE, 31);
+#endif
 
 	if (h2n->sid)
 		h2n->swsi = lws_h2_wsi_from_id(wsi, h2n->sid);
@@ -1267,6 +1283,8 @@ lws_h2_parse_end_of_frame(struct lws *wsi)
 			h2n->swsi->user_space = wsi->user_space;
 			h2n->swsi->user_space_externally_allocated =
 					wsi->user_space_externally_allocated;
+			h2n->swsi->opaque_user_data = wsi->opaque_user_data;
+			wsi->opaque_user_data = NULL;
 
 			wsi->user_space = NULL;
 
@@ -1294,17 +1312,16 @@ lws_h2_parse_end_of_frame(struct lws *wsi)
 
 			/* we have a transaction queue that wants to pipeline */
 			lws_vhost_lock(wsi->vhost);
-			lws_start_foreach_dll_safe(struct lws_dll_lws *, d, d1,
-				  wsi->dll_client_transaction_queue_head.next) {
+			lws_start_foreach_dll_safe(struct lws_dll2 *, d, d1,
+				  wsi->dll2_cli_txn_queue_owner.head) {
 				struct lws *w = lws_container_of(d, struct lws,
-						dll_client_transaction_queue);
+						dll2_cli_txn_queue);
 
 				if (lwsi_state(w) == LRS_H1C_ISSUE_HANDSHAKE2) {
 					lwsl_info("%s: cli pipeq %p to be h2\n",
 							__func__, w);
 					/* remove ourselves from client queue */
-					lws_dll_lws_remove(
-					      &w->dll_client_transaction_queue);
+					lws_dll2_remove(&w->dll2_cli_txn_queue);
 
 					/* attach ourselves as an h2 stream */
 					lws_wsi_h2_adopt(wsi, w);
@@ -1804,10 +1821,14 @@ lws_h2_parser(struct lws *wsi, unsigned char *in, lws_filepos_t inlen,
 				 * subs are active... our frame may take a long
 				 * time to chew through
 				 */
-				if (!wsi->ws_over_h2_count)
+				if (!wsi->immortal_substream_count)
 					lws_set_timeout(wsi,
 					  PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE,
+#if defined(LWS_AMAZON_RTOS) || defined(LWS_AMAZON_NOART)
+					  wsi->vhost->keepalive_timeout);
+#else
 					  31);
+#endif
 
 				if (!h2n->swsi)
 					break;
@@ -1883,7 +1904,7 @@ lws_h2_parser(struct lws *wsi, unsigned char *in, lws_filepos_t inlen,
 						if (m) {
 							struct lws_context_per_thread *pt = &wsi->context->pt[(int)wsi->tsi];
 							lwsl_debug("%s: added %p to rxflow list\n", __func__, wsi);
-							lws_dll_lws_add_front(&h2n->swsi->dll_buflist, &pt->dll_head_buflist);
+							lws_dll2_add_head(&h2n->swsi->dll_buflist, &pt->dll_buflist_owner);
 						}
 						in += n - 1;
 						h2n->inside += n;
@@ -2212,6 +2233,18 @@ lws_h2_ws_handshake(struct lws *wsi)
 	if (lws_hdr_total_length(wsi, WSI_TOKEN_PROTOCOL) > 64)
 		return -1;
 
+	if (wsi->proxied_ws_parent && wsi->child_list) {
+		if (lws_hdr_simple_ptr(wsi, WSI_TOKEN_PROTOCOL)) {
+			if (lws_add_http_header_by_token(wsi, WSI_TOKEN_PROTOCOL,
+				(uint8_t *)lws_hdr_simple_ptr(wsi,
+							   WSI_TOKEN_PROTOCOL),
+				strlen(lws_hdr_simple_ptr(wsi,
+							   WSI_TOKEN_PROTOCOL)),
+						 &p, end))
+			return -1;
+		}
+	} else {
+
 	/* we can only return the protocol header if:
 	 *  - one came in, and ... */
 	if (lws_hdr_total_length(wsi, WSI_TOKEN_PROTOCOL) &&
@@ -2223,11 +2256,13 @@ lws_h2_ws_handshake(struct lws *wsi)
 					 &p, end))
 		return -1;
 	}
+	}
 
 	if (lws_finalize_http_header(wsi, &p, end))
 		return -1;
 
 	m = lws_ptr_diff(p, start);
+	// lwsl_hexdump_notice(start, m);
 	n = lws_write(wsi, start, m, LWS_WRITE_HTTP_HEADERS);
 	if (n != m) {
 		lwsl_err("_write returned %d from %d\n", n, m);

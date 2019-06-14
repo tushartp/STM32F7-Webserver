@@ -22,10 +22,58 @@
 #include "core/private.h"
 
 static const unsigned char lextable[] = {
+#if defined(LWS_AMAZON_RTOS) || defined(LWS_AMAZON_NOART)
+	#include "roles/http/lextable.h"
+#else
 	#include "../lextable.h"
+#endif
 };
 
 #define FAIL_CHAR 0x08
+
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+
+#define UHO_NLEN	0
+#define UHO_VLEN	2
+#define UHO_LL		4
+#define UHO_NAME	8
+
+static uint16_t
+lws_un16be_get(const void *_p)
+{
+	const uint8_t *p = _p;
+
+	return ((uint16_t)p[0] << 8) | p[1];
+}
+
+static void
+lws_un16be_set(void *_p, uint16_t v)
+{
+	uint8_t *p = _p;
+
+	*p++ = (uint8_t)(v >> 8);
+	*p++ = (uint8_t)v;
+}
+
+static uint32_t
+lws_un32be_get(const void *_p)
+{
+	const uint8_t *p = _p;
+
+	return (uint32_t)((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
+}
+
+static void
+lws_un32be_set(void *_p, uint32_t v)
+{
+	uint8_t *p = _p;
+
+	*p++ = (uint8_t)(v >> 24);
+	*p++ = (uint8_t)(v >> 16);
+	*p++ = (uint8_t)(v >> 8);
+	*p = (uint8_t)v;
+}
+#endif
 
 static struct allocated_headers *
 _lws_create_ah(struct lws_context_per_thread *pt, ah_data_idx_t data_size)
@@ -46,8 +94,8 @@ _lws_create_ah(struct lws_context_per_thread *pt, ah_data_idx_t data_size)
 	ah->data_length = data_size;
 	pt->http.ah_pool_length++;
 
-	lwsl_info("%s: created ah %p (size %d): pool length %lu\n", __func__,
-		    ah, (int)data_size, pt->http.ah_pool_length);
+	lwsl_info("%s: created ah %p (size %d): pool length %ld\n", __func__,
+		    ah, (int)data_size, (unsigned long)pt->http.ah_pool_length);
 
 	return ah;
 }
@@ -59,8 +107,9 @@ _lws_destroy_ah(struct lws_context_per_thread *pt, struct allocated_headers *ah)
 		if ((*a) == ah) {
 			*a = ah->next;
 			pt->http.ah_pool_length--;
-			lwsl_info("%s: freed ah %p : pool length %lu\n",
-				    __func__, ah, pt->http.ah_pool_length);
+			lwsl_info("%s: freed ah %p : pool length %ld\n",
+				    __func__, ah,
+				    (unsigned long)pt->http.ah_pool_length);
 			if (ah->data)
 				lws_free(ah->data);
 			lws_free(ah);
@@ -83,6 +132,11 @@ _lws_header_table_reset(struct allocated_headers *ah)
 	ah->http_response = 0;
 	ah->parser_state = WSI_TOKEN_NAME_PART;
 	ah->lextable_pos = 0;
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+	ah->unk_pos = 0;
+	ah->unk_ll_head = 0;
+	ah->unk_ll_tail = 0;
+#endif
 }
 
 // doesn't scrub the ah rxbuffer by default, parent must do if needed
@@ -197,6 +251,12 @@ lws_header_table_attach(struct lws *wsi, int autoservice)
 		  (void *)wsi, (void *)wsi->http.ah, wsi->tsi,
 		  pt->http.ah_count_in_use);
 
+	if (!lwsi_role_http(wsi)) {
+		lwsl_err("%s: bad role %s\n", __func__, wsi->role_ops->name);
+		assert(0);
+		return -1;
+	}
+
 	lws_pt_lock(pt, __func__);
 
 	/* if we are already bound to one, just clear it down */
@@ -302,7 +362,7 @@ int __lws_header_table_detach(struct lws *wsi, int autoservice)
 		 */
 		lwsl_debug("%s: wsi %p: ah held %ds, role/state 0x%lx 0x%x,"
 			    "\n", __func__, wsi, (int)(now - ah->assigned),
-			    lwsi_role(wsi), lwsi_state(wsi));
+			    (unsigned long)lwsi_role(wsi), lwsi_state(wsi));
 	}
 
 	ah->assigned = 0;
@@ -355,7 +415,8 @@ int __lws_header_table_detach(struct lws *wsi, int autoservice)
 		goto nobody_usable_waiting;
 
 	lwsl_info("%s: transferring ah to last eligible wsi in wait list "
-		  "%p (wsistate 0x%lx)\n", __func__, wsi, wsi->wsistate);
+		  "%p (wsistate 0x%lx)\n", __func__, wsi,
+		  (unsigned long)wsi->wsistate);
 
 	wsi->http.ah = ah;
 	ah->wsi = wsi; /* new owner */
@@ -545,6 +606,62 @@ LWS_VISIBLE int lws_hdr_copy(struct lws *wsi, char *dst, int len,
 	return toklen;
 }
 
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+LWS_VISIBLE int
+lws_hdr_custom_length(struct lws *wsi, const char *name, int nlen)
+{
+	ah_data_idx_t ll;
+
+	if (!wsi->http.ah || wsi->http2_substream)
+		return -1;
+
+	ll = wsi->http.ah->unk_ll_head;
+	while (ll) {
+		if (ll >= wsi->http.ah->data_length)
+			return -1;
+		if (nlen == lws_un16be_get(&wsi->http.ah->data[ll + UHO_NLEN]) &&
+		    !strncmp(name, &wsi->http.ah->data[ll + UHO_NAME], nlen))
+			return lws_un16be_get(&wsi->http.ah->data[ll + UHO_VLEN]);
+
+		ll = lws_un32be_get(&wsi->http.ah->data[ll + UHO_LL]);
+	}
+
+	return -1;
+}
+
+LWS_VISIBLE int
+lws_hdr_custom_copy(struct lws *wsi, char *dst, int len, const char *name,
+		    int nlen)
+{
+	ah_data_idx_t ll;
+	int n;
+
+	if (!wsi->http.ah || wsi->http2_substream)
+		return -1;
+
+	*dst = '\0';
+
+	ll = wsi->http.ah->unk_ll_head;
+	while (ll) {
+		if (ll >= wsi->http.ah->data_length)
+			return -1;
+		if (nlen == lws_un16be_get(&wsi->http.ah->data[ll + UHO_NLEN]) &&
+		    !strncmp(name, &wsi->http.ah->data[ll + UHO_NAME], nlen)) {
+			n = lws_un16be_get(&wsi->http.ah->data[ll + UHO_VLEN]);
+			if (n + 1 > len)
+				return -1;
+			strncpy(dst, &wsi->http.ah->data[ll + UHO_NAME + nlen], n);
+			dst[n] = '\0';
+
+			return n;
+		}
+		ll = lws_un32be_get(&wsi->http.ah->data[ll + UHO_LL]);
+	}
+
+	return -1;
+}
+#endif
+
 char *lws_hdr_simple_ptr(struct lws *wsi, enum lws_token_indexes h)
 {
 	int n;
@@ -578,8 +695,9 @@ lws_pos_in_bounds(struct lws *wsi)
 	 * with these tests everywhere, it should never be able to exceed
 	 * the limit, only meet it
 	 */
-	lwsl_err("%s: pos %lu, limit %d\n", __func__, wsi->http.ah->pos,
-		 wsi->context->max_http_header_data);
+	lwsl_err("%s: pos %ld, limit %ld\n", __func__,
+		 (unsigned long)wsi->http.ah->pos,
+		 (unsigned long)wsi->context->max_http_header_data);
 	assert(0);
 
 	return 1;
@@ -639,9 +757,9 @@ issue_char(struct lws *wsi, unsigned char c)
 			return -1;
 
 		wsi->http.ah->data[wsi->http.ah->pos++] = '\0';
-		lwsl_warn("header %i exceeds limit %lu\n",
-			  wsi->http.ah->parser_state,
-			  wsi->http.ah->current_token_limit);
+		lwsl_warn("header %li exceeds limit %ld\n",
+			  (long)wsi->http.ah->parser_state,
+			  (long)wsi->http.ah->current_token_limit);
 	}
 
 	return 1;
@@ -867,6 +985,32 @@ lws_parse(struct lws *wsi, unsigned char *buf, int *len)
 		c = *buf++;
 
 		switch (ah->parser_state) {
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+		case WSI_TOKEN_UNKNOWN_VALUE_PART:
+
+			if (c == '\r')
+				break;
+			if (c == '\n') {
+				lws_un16be_set(&ah->data[ah->unk_pos + 2],
+					       ah->pos - ah->unk_value_pos);
+				ah->parser_state = WSI_TOKEN_NAME_PART;
+				ah->unk_pos = 0;
+				ah->lextable_pos = 0;
+				break;
+			}
+
+			/* trim leading whitespace */
+			if (ah->pos != ah->unk_value_pos ||
+			    (c != ' ' && c != '\t')) {
+
+				if (lws_pos_in_bounds(wsi))
+					return -1;
+
+				ah->data[ah->pos++] = c;
+			}
+			pos = ah->lextable_pos;
+			break;
+#endif
 		default:
 
 			lwsl_parser("WSI_TOK_(%d) '%c'\n", ah->parser_state, c);
@@ -928,7 +1072,7 @@ lws_parse(struct lws *wsi, unsigned char *buf, int *len)
 			case LPUR_EXCESSIVE:
 				goto excessive;
 			default:
-				return -1;
+				return LPR_FAIL;
 			}
 check_eol:
 			/* bail at EOL */
@@ -944,7 +1088,7 @@ check_eol:
 
 			n = issue_char(wsi, c);
 			if ((int)n < 0)
-				return -1;
+				return LPR_FAIL;
 			if (n > 0)
 				ah->parser_state = WSI_TOKEN_SKIPPING;
 
@@ -957,14 +1101,83 @@ swallow:
 
 			/* collecting and checking a name part */
 		case WSI_TOKEN_NAME_PART:
-			lwsl_parser("WSI_TOKEN_NAME_PART '%c' 0x%02X (role=0x%lx) "
-				    "wsi->lextable_pos=%d\n", c, c, lwsi_role(wsi),
+			lwsl_parser("WSI_TOKEN_NAME_PART '%c' 0x%02X "
+				    "(role=0x%lx) "
+				    "wsi->lextable_pos=%d\n", c, c,
+				    (unsigned long)lwsi_role(wsi),
 				    ah->lextable_pos);
 
 			if (c >= 'A' && c <= 'Z')
 				c += 'a' - 'A';
 
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+			/*
+			 * ...in case it's an unknown header, speculatively
+			 * store it as the name comes in.  If we recognize it as
+			 * a known header, we'll snip this.
+			 */
+
+			if (!ah->unk_pos) {
+				ah->unk_pos = ah->pos;
+				/*
+				 * Prepare new unknown header linked-list entry
+				 *
+				 *  - 16-bit BE: name part length
+				 *  - 16-bit BE: value part length
+				 *  - 32-bit BE: data offset of next, or 0
+				 */
+				for (n = 0; n < 8; n++)
+					if (!lws_pos_in_bounds(wsi))
+						ah->data[ah->pos++] = 0;
+			}
+#endif
+
+			if (lws_pos_in_bounds(wsi))
+				return -1;
+
+			ah->data[ah->pos++] = c;
 			pos = ah->lextable_pos;
+
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+			if (pos < 0 && c == ':') {
+				/*
+				 * process unknown headers
+				 *
+				 * register us in the unknown hdr ll
+				 */
+
+				if (!ah->unk_ll_head)
+					ah->unk_ll_head = ah->unk_pos;
+
+				if (ah->unk_ll_tail)
+					lws_un32be_set(&ah->data[ah->unk_ll_tail + UHO_LL],
+						       ah->unk_pos);
+
+				ah->unk_ll_tail = ah->unk_pos;
+
+				lwsl_debug("%s: unk header %d '%.*s'\n",
+					   __func__,
+					   ah->pos - (ah->unk_pos + UHO_NAME),
+					   ah->pos - (ah->unk_pos + UHO_NAME),
+					   &ah->data[ah->unk_pos + UHO_NAME]);
+
+				/* set the unknown header name part length */
+
+				lws_un16be_set(&ah->data[ah->unk_pos],
+					       (ah->pos - ah->unk_pos) - UHO_NAME);
+
+				ah->unk_value_pos = ah->pos;
+
+				/*
+				 * collect whatever's coming for the unknown header
+				 * argument until the next CRLF
+				 */
+				ah->parser_state = WSI_TOKEN_UNKNOWN_VALUE_PART;
+				break;
+			}
+#endif
+			if (pos < 0)
+				break;
 
 			while (1) {
 				if (lextable[pos] & (1 << 7)) {
@@ -987,7 +1200,16 @@ nope:
 					goto nope;
 
 				/* b7 = 0, end or 3-byte */
-				if (lextable[pos] < FAIL_CHAR) { /* term mark */
+				if (lextable[pos] < FAIL_CHAR) {
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+					/*
+					 * We hit a terminal marker, so we
+					 * recognized this header... drop the
+					 * speculative name part storage
+					 */
+					ah->pos = ah->unk_pos;
+					ah->unk_pos = 0;
+#endif
 					ah->lextable_pos = pos;
 					break;
 				}
@@ -1005,45 +1227,66 @@ nope:
 			}
 
 			/*
-			 * If it's h1, server needs to look out for unknown
-			 * methods...
+			 * If it's h1, server needs to be on the look out for
+			 * unknown methods...
 			 */
 			if (ah->lextable_pos < 0 && lwsi_role_h1(wsi) &&
 			    lwsi_role_server(wsi)) {
-				/* this is not a header we know about */
+				/*
+				 * this is not a header we know about... did
+				 * we get a valid method (GET, POST etc)
+				 * already, or is this the bogus method?
+				 */
 				for (m = 0; m < LWS_ARRAY_SIZE(methods); m++)
 					if (ah->frag_index[methods[m]]) {
 						/*
-						 * already had the method, no idea what
-						 * this crap from the client is, ignore
+						 * already had the method
 						 */
+#if !defined(LWS_WITH_CUSTOM_HEADERS)
 						ah->parser_state = WSI_TOKEN_SKIPPING;
+#endif
 						break;
 					}
+
+				if (m != LWS_ARRAY_SIZE(methods))
+#if defined(LWS_WITH_CUSTOM_HEADERS)
 				/*
-				 * hm it's an unknown http method from a client in fact,
-				 * it cannot be valid http
+					 * We have the method, this is just an
+					 * unknown header then
 				 */
-				if (m == LWS_ARRAY_SIZE(methods)) {
+					goto unknown_hdr;
+#else
+					break;
+#endif
 					/*
-					 * are we set up to accept raw in these cases?
+				 * ...it's an unknown http method from a client
+				 * in fact, it cannot be valid http.
+				 *
+				 * Are we set up to transition to another role
+				 * in these cases?
 					 */
 					if (lws_check_opt(wsi->vhost->options,
-						   LWS_SERVER_OPTION_FALLBACK_TO_RAW))
-						return 2; /* transition to raw */
+		    LWS_SERVER_OPTION_FALLBACK_TO_APPLY_LISTEN_ACCEPT_CONFIG)) {
+					lwsl_notice("%s: http fail fallback\n",
+						    __func__);
+					 /* transition to other role */
+					return LPR_DO_FALLBACK;
+				}
 
 					lwsl_info("Unknown method - dropping\n");
 					goto forbid;
 				}
-				break;
-			}
-			/*
-			 * ...otherwise for a client, let him ignore unknown headers
-			 * coming from the server
-			 */
 			if (ah->lextable_pos < 0) {
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+				goto unknown_hdr;
+#else
+			/*
+				 * ...otherwise for a client, let him ignore
+				 * unknown headers coming from the server
+			 */
 				ah->parser_state = WSI_TOKEN_SKIPPING;
 				break;
+#endif
 			}
 
 			if (lextable[ah->lextable_pos] < FAIL_CHAR) {
@@ -1057,7 +1300,7 @@ nope:
 					if (n == methods[m] &&
 					    ah->frag_index[methods[m]]) {
 						lwsl_warn("Duplicated method\n");
-						return -1;
+						return LPR_FAIL;
 					}
 
 				/*
@@ -1086,12 +1329,19 @@ nope:
 			}
 			break;
 
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+unknown_hdr:
+			//ah->parser_state = WSI_TOKEN_SKIPPING;
+			//break;
+			break;
+#endif
+
 start_fragment:
 			ah->nfrag++;
 excessive:
 			if (ah->nfrag == LWS_ARRAY_SIZE(ah->frags)) {
 				lwsl_warn("More hdr frags than we can deal with\n");
-				return -1;
+				return LPR_FAIL;
 			}
 
 			ah->frags[ah->nfrag].offset = ah->pos;
@@ -1111,7 +1361,7 @@ excessive:
 			ah->frags[n].nfrag = ah->nfrag;
 
 			if (issue_char(wsi, ' ') < 0)
-				return -1;
+				return LPR_FAIL;
 			break;
 
 			/* skipping arg part of a name we didn't recognize */
@@ -1128,6 +1378,9 @@ excessive:
 				goto forbid;
 			if (c == '\x0a') {
 				ah->parser_state = WSI_TOKEN_NAME_PART;
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+				ah->unk_pos = 0;
+#endif
 				ah->lextable_pos = 0;
 			} else
 				ah->parser_state = WSI_TOKEN_SKIPPING;
@@ -1141,7 +1394,7 @@ excessive:
 
 	} while (*len);
 
-	return 0;
+	return LPR_OK;
 
 set_parsing_complete:
 	if (ah->ues != URIES_IDLE)
@@ -1157,12 +1410,12 @@ set_parsing_complete:
 	ah->parser_state = WSI_PARSING_COMPLETE;
 	wsi->hdr_parsing_completed = 1;
 
-	return 0;
+	return LPR_OK;
 
 forbid:
 	lwsl_notice(" forbidding on uri sanitation\n");
 	lws_return_http_status(wsi, HTTP_STATUS_FORBIDDEN, NULL);
 
-	return -1;
+	return LPR_FORBIDDEN;
 }
 

@@ -30,23 +30,6 @@
 #define MBA(fn) fn
 #endif
 
-size_t
-lws_genhash_size(enum lws_genhash_types type)
-{
-	switch(type) {
-	case LWS_GENHASH_TYPE_SHA1:
-		return 20;
-	case LWS_GENHASH_TYPE_SHA256:
-		return 32;
-	case LWS_GENHASH_TYPE_SHA384:
-		return 48;
-	case LWS_GENHASH_TYPE_SHA512:
-		return 64;
-	}
-
-	return 0;
-}
-
 int
 lws_genhash_init(struct lws_genhash_ctx *ctx, enum lws_genhash_types type)
 {
@@ -79,6 +62,9 @@ lws_genhash_init(struct lws_genhash_ctx *ctx, enum lws_genhash_types type)
 int
 lws_genhash_update(struct lws_genhash_ctx *ctx, const void *in, size_t len)
 {
+	if (!len)
+		return 0;
+
 	switch (ctx->type) {
 	case LWS_GENHASH_TYPE_SHA1:
 		MBA(mbedtls_sha1_update)(&ctx->u.sha1, in, len);
@@ -117,21 +103,6 @@ lws_genhash_destroy(struct lws_genhash_ctx *ctx, void *result)
 		MBA(mbedtls_sha512_finish)(&ctx->u.sha512, result);
 		mbedtls_sha512_free(&ctx->u.sha512);
 		break;
-	}
-
-	return 0;
-}
-
-size_t
-lws_genhmac_size(enum lws_genhmac_types type)
-{
-	switch(type) {
-	case LWS_GENHMAC_TYPE_SHA256:
-		return 32;
-	case LWS_GENHMAC_TYPE_SHA384:
-		return 48;
-	case LWS_GENHMAC_TYPE_SHA512:
-		return 64;
 	}
 
 	return 0;
@@ -179,6 +150,9 @@ lws_genhmac_init(struct lws_genhmac_ctx *ctx, enum lws_genhmac_types type,
 int
 lws_genhmac_update(struct lws_genhmac_ctx *ctx, const void *in, size_t len)
 {
+	if (!len)
+		return 0;
+
 	if (mbedtls_md_hmac_update(&ctx->ctx, in, len))
 		return -1;
 

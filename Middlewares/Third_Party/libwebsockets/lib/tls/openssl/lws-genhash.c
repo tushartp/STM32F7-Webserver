@@ -22,23 +22,11 @@
  *  same whether you are using openssl or mbedtls hash functions underneath.
  */
 #include "libwebsockets.h"
-
-size_t
-lws_genhash_size(enum lws_genhash_types type)
-{
-	switch(type) {
-	case LWS_GENHASH_TYPE_SHA1:
-		return 20;
-	case LWS_GENHASH_TYPE_SHA256:
-		return 32;
-	case LWS_GENHASH_TYPE_SHA384:
-		return 48;
-	case LWS_GENHASH_TYPE_SHA512:
-		return 64;
-	}
-
-	return 0;
-}
+#include <openssl/obj_mac.h>
+/*
+ * Care: many openssl apis return 1 for success.  These are translated to the
+ * lws convention of 0 for success.
+ */
 
 int
 lws_genhash_init(struct lws_genhash_ctx *ctx, enum lws_genhash_types type)
@@ -77,6 +65,9 @@ lws_genhash_init(struct lws_genhash_ctx *ctx, enum lws_genhash_types type)
 int
 lws_genhash_update(struct lws_genhash_ctx *ctx, const void *in, size_t len)
 {
+	if (!len)
+		return 0;
+
 	return EVP_DigestUpdate(ctx->mdctx, in, len) != 1;
 }
 
@@ -96,42 +87,26 @@ lws_genhash_destroy(struct lws_genhash_ctx *ctx, void *result)
 	return ret;
 }
 
-size_t
-lws_genhmac_size(enum lws_genhmac_types type)
-{
-	switch(type) {
-	case LWS_GENHMAC_TYPE_SHA256:
-		return 32;
-	case LWS_GENHMAC_TYPE_SHA384:
-		return 48;
-	case LWS_GENHMAC_TYPE_SHA512:
-		return 64;
-	}
-
-	return 0;
-}
-
 int
 lws_genhmac_init(struct lws_genhmac_ctx *ctx, enum lws_genhmac_types type,
 		 const uint8_t *key, size_t key_len)
 {
-	const char *ts;
-	const EVP_MD *md;
 	EVP_PKEY *pkey;
 
 	ctx->type = type;
 
 	switch (type) {
 	case LWS_GENHMAC_TYPE_SHA256:
-		ts = "SHA256";
+		ctx->evp_type = EVP_sha256();
 		break;
 	case LWS_GENHMAC_TYPE_SHA384:
-		ts = "SHA384";
+		ctx->evp_type = EVP_sha384();
 		break;
 	case LWS_GENHMAC_TYPE_SHA512:
-		ts = "SHA512";
+		ctx->evp_type = EVP_sha512();
 		break;
 	default:
+		lwsl_err("%s: unknown HMAC type %d\n", __func__, type);
 		return -1;
 	}
 
@@ -139,16 +114,12 @@ lws_genhmac_init(struct lws_genhmac_ctx *ctx, enum lws_genhmac_types type,
         if (!ctx->ctx)
 		return -1;
 
-        md = EVP_get_digestbyname(ts);
-        if (!md)
-		return -1;
-
-        if (EVP_DigestInit_ex(ctx->ctx, md, NULL) != 1)
+        if (EVP_DigestInit_ex(ctx->ctx, ctx->evp_type, NULL) != 1)
 		return -1;
 
         pkey = EVP_PKEY_new_mac_key(EVP_PKEY_HMAC, NULL, key, (int)key_len);
 
-        if (EVP_DigestSignInit(ctx->ctx, NULL, md, NULL, pkey) != 1)
+        if (EVP_DigestSignInit(ctx->ctx, NULL, ctx->evp_type, NULL, pkey) != 1)
 		return -1;
 
         EVP_PKEY_free(pkey);
